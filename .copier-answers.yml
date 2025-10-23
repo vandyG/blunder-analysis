@@ -1,0 +1,20 @@
+# Changes here will be overwritten by Copier.
+_commit: 1.10.2
+_src_path: gh:pawamoy/copier-uv
+author_email: vandy.goel23@gmail.com
+author_fullname: Vandit Goel
+author_username: vandyG
+copyright_date: '2025'
+copyright_holder: Vandit Goel
+copyright_holder_email: vandy.goel23@gmail.com
+copyright_license: MIT
+insiders: false
+project_description: Blunder analysis in Chess
+project_name: blunder-analysis
+python_package_command_line_name: blunder
+python_package_distribution_name: blunder
+python_package_import_name: blunder
+repository_name: blunder-analysis
+repository_namespace: vandyG
+repository_provider: github.com
+
