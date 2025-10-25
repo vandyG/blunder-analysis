@@ -79,6 +79,7 @@ exclude = [
 maintain = [
     "build>=1.2",
     "git-changelog>=2.5",
+    "hatch>=1.15.1",
     "twine>=5.1",
     "yore>=0.3.3",
 ]
