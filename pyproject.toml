@@ -29,7 +29,9 @@ classifiers = [
     "Topic :: Utilities",
     "Typing :: Typed",
 ]
-dependencies = []
+dependencies = [
+    "chess>=1.11.2",
+]
 
 [project.urls]
 Homepage = "https://vandyG.github.io/blunder-analysis"
@@ -105,6 +107,13 @@ ci = [
     # YORE: EOL 3.10: Remove line.
     "tomli>=2.0; python_version < '3.11'",
 ]
+dev = [
+    "ipykernel>=6.31.0",
+    "jupyter>=1.1.1",
+    "notebook>=7.4.7",
+    "pip>=25.2",
+    "zstandard>=0.25.0",
+]   
 
 [tool.uv]
-default-groups = ["maintain", "ci", "docs"]
+default-groups = "all"
