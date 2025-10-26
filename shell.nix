@@ -15,5 +15,6 @@ pkgs.mkShell {
     pkgs.python310
     pkgs.uv
     pkgs.postgresql
+    pkgs.stockfish
   ];
 }
