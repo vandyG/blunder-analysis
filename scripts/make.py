@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -111,6 +112,32 @@ def allrun(cmd: str, *args: str, **kwargs: Any) -> None:
         multirun(cmd, *args, **kwargs)
 
 
+def pg(action: str) -> None:
+    """Start or stop the Postgres server managed by PGDATA."""
+    pgdata = os.getenv("PGDATA")
+    if not pgdata:
+        raise ValueError("make: pg: PGDATA environment variable must be set")
+
+    data_path = Path(pgdata)
+    socket_path = data_path / "socket"
+    socket_path.mkdir(parents=True, exist_ok=True)
+    log_path = data_path / "server.log"
+
+    if action == "start":
+        postgres_opts = shlex.quote(f"-k {socket_path}")
+        cmd = (
+            f"pg_ctl -D {shlex.quote(str(data_path))} "
+            f"-o {postgres_opts} "
+            f"-l {shlex.quote(str(log_path))} start"
+        )
+    elif action == "stop":
+        cmd = f"pg_ctl -D {shlex.quote(str(data_path))} stop"
+    else:
+        raise ValueError(f"make: pg: unsupported action '{action}'")
+
+    shell(cmd)
+
+
 def clean() -> None:
     """Delete build artifacts and cache files."""
     paths_to_clean = ["build", "dist", "htmlcov", "site", ".coverage*", ".pdm-build"]
@@ -145,6 +172,7 @@ def main() -> int:
                       multirun              Run a command for all configured Python versions.
                       allrun                Run a command in all virtual environments.
                       3.x                   Run a command in the virtual environment for Python 3.x.
+                      pg start|stop         Start or stop the Postgres server (requires PGDATA).
                       clean                 Delete build artifacts and cache files.
                       vscode                Configure VSCode to work on this project.
                     """,
@@ -186,6 +214,17 @@ def main() -> int:
                 return 1
             run(cmd, *args)  # ty: ignore[missing-argument]
             return 0
+
+        if cmd == "pg":
+            if not args:
+                print("make: pg: missing action (start|stop)", file=sys.stderr)
+                return 1
+            action = args.pop(0)
+            if action not in {"start", "stop"}:
+                print("make: pg: action must be 'start' or 'stop'", file=sys.stderr)
+                return 1
+            pg(action)
+            continue
 
         opts = []
         while args and (args[0].startswith("-") or "=" in args[0]):

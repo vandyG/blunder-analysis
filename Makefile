@@ -24,6 +24,7 @@ actions = \
 	format \
 	help \
 	multirun \
+	pg \
 	release \
 	run \
 	setup \
