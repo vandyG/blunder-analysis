@@ -31,6 +31,8 @@ classifiers = [
 ]
 dependencies = [
     "chess>=1.11.2",
+    "numpy>=2.0.2",
+    "tqdm>=4.67.1",
 ]
 
 [project.urls]
@@ -44,35 +46,25 @@ Gitter = "https://gitter.im/blunder-analysis/community"
 Funding = "https://github.com/sponsors/vandyG"
 
 [project.scripts]
-blunder = "blunder.cli:main"
+blunder = "blunder:main"
 
 [tool.hatch.version]
 source = "vcs"
 
 [tool.hatch.build.targets.sdist]
-include = [
-    "config/**",
-    "docs/**",
-    "scripts/**",
-    "share/**",
-    "tests/**",
-    "duties.py",
-    "mkdocs.yml",
-    "*.md",
-    "LICENSE",
-]
 exclude = [
     ".github/**",
     ".github",
+    "notebooks/**",
 ]
+sources = ["src"]
 
 [tool.hatch.build.targets.wheel]
-include = [
-    "share/**",
-]
+sources = ["src"]
 exclude = [
     ".github/**",
     ".github",
+    "notebooks/**",
 ]
 
 [dependency-groups]
