@@ -9,7 +9,7 @@ authors = [{name = "Vandit Goel", email = "vandy.goel23@gmail.com"}]
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 keywords = []
 dynamic = ["version"]
 classifiers = [
@@ -18,7 +18,6 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -33,6 +32,7 @@ dependencies = [
     "chess>=1.11.2",
     "numpy>=2.0.2",
     "tqdm>=4.67.1",
+    "typer>=0.20.0",
 ]
 
 [project.urls]
@@ -46,7 +46,7 @@ Gitter = "https://gitter.im/blunder-analysis/community"
 Funding = "https://github.com/sponsors/vandyG"
 
 [project.scripts]
-blunder = "blunder:main"
+blunder = "blunder:app"
 
 [tool.hatch.version]
 source = "vcs"
