@@ -13,9 +13,17 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Annotated, Any
+
+import typer
 
 from blunder._internal import debug
+from blunder._internal.util import discover_offsets
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+app = typer.Typer(help="Blunder command line interface.")
 
 
 class _DebugInfo(argparse.Action):
@@ -39,7 +47,14 @@ def get_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(args: list[str] | None = None) -> int:
+@app.command()
+def main(
+    version: Annotated[bool | None, typer.Option("--version", callback=debug._get_version, is_eager=True)] = None,
+    debug_info: Annotated[
+        bool | None,
+        typer.Option("--debug-info", callback=debug._print_debug_info, is_eager=True),
+    ] = None,
+) -> int:
     """Run the main program.
 
     This function is executed when you type `blunder` or `python -m blunder`.
@@ -50,7 +65,29 @@ def main(args: list[str] | None = None) -> int:
     Returns:
         An exit code.
     """
-    parser = get_parser()
-    opts = parser.parse_args(args=args)
-    print(opts)
-    return 0
+    raise NotImplementedError("Main command not implemented yet.")
+
+
+@app.command()
+def pgn2pg(
+    pgn_path: Path,
+    *,
+    create_index_only: Annotated[
+        bool,
+        typer.Option("--create-index-only", "-i", help="Create only index file."),
+    ] = False,
+    use_memmap: Annotated[bool, typer.Option("--use-memmap", "-m", help="Use memory-mapped files.")] = True,
+) -> None:
+    """Convert PGN files to PG format.
+
+    This is a placeholder for the actual implementation.
+    """
+    print("pgn2pg command invoked.")
+
+    memmap_path = str(pgn_path.with_suffix(".idx")) if use_memmap else None
+
+    index = discover_offsets(str(pgn_path), use_memmap=use_memmap, memmap_path=memmap_path)
+
+    if create_index_only:
+        print(f"Index created with {len(index)} entries.")
+        raise typer.Exit
