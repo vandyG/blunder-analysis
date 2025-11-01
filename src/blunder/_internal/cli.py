@@ -13,15 +13,13 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import TYPE_CHECKING, Annotated, Any
+from pathlib import Path  # noqa: TC003
+from typing import Annotated, Any
 
 import typer
 
 from blunder._internal import debug
 from blunder._internal.util import discover_offsets
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 app = typer.Typer(help="Blunder command line interface.")
 
