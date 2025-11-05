@@ -8,6 +8,7 @@ with concrete implementations that suit your environment.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
+import chess
 import numpy as np
 from chess import engine, pgn
 
@@ -33,6 +35,7 @@ except ImportError:  # pragma: no cover - optional dependency guard
     tqdm = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+_ENGINE: engine.SimpleEngine | None = None
 
 
 @dataclass(slots=True)
@@ -67,17 +70,77 @@ class ProcessingConfig:
     resume_from_checkpoint: bool = True
     # TODO: Add tuning parameters (e.g., time management, pruning strategy)
 
-
 @dataclass(slots=True)
 class GameRecord:
     """Container for processed game data destined for the database writer."""
 
     offset: int
-    headers: dict[str, str]
-    moves: list[str]
-    positions: list[str]
-    engine_scores: list[dict[str, float]]
-    # TODO: Expand with additional metadata when needed
+    game_id: str
+    site: str
+    white_elo: int
+    black_elo: int
+    white_rating_diff: int
+    black_rating_diff: int
+    eco: str
+    time_control: pgn.TimeControlType
+    game_time: int
+    increment: int
+    moves: list[MoveRecord] = field(default_factory=list)
+    outcome: chess.Outcome | None = None
+
+    def add_move(self, move: MoveRecord) -> None:
+        """Append a move while parsing the game incrementally."""
+        self.moves.append(move)
+
+    def finalize(self, outcome: chess.Outcome) -> None:
+        """Set final attributes once parsing/analysis is complete."""
+        if outcome is not None:
+            self.outcome = outcome
+
+@dataclass(slots=True)
+class MoveRecord:
+    """Container for processed move data within a game."""
+    turn: chess.Color
+    move: str
+    fullmove_number: int
+    cp_score: int
+    winning_chance: float
+    drawing_chance: float
+    losing_chance: float
+    piece_moved: chess.Piece
+    board_fen: str
+    is_check: bool
+    mate_in: int | None
+    clock: float
+    eval_delta: int
+    emt: float
+
+def time_control_type(initial_time: int, increment: int) -> pgn.TimeControlType:
+    """Determine time control category by estimated total time (seconds).
+
+    Uses named constants for the thresholds to avoid magic numbers.
+    """
+    # Thresholds (estimated total time in seconds) for categories
+    bullet_max = 179
+    blitz_max = 479
+    rapid_max = 1499
+
+    estimated_time = initial_time + (40 * increment)
+    if estimated_time <= bullet_max:
+        return pgn.TimeControlType.BULLET
+    if estimated_time <= blitz_max:
+        return pgn.TimeControlType.BLITZ
+    if estimated_time <= rapid_max:
+        return pgn.TimeControlType.RAPID
+    return pgn.TimeControlType.STANDARD
+
+def parse_time_control(tc_str: str) -> tuple[pgn.TimeControlType, int, int]:
+    """Parse a time control string into initial time and increment in seconds."""
+    if tc_str == "unlimited":
+        return (pgn.TimeControlType.UNLIMITED, 0, 0)
+
+    initial_str, increment_str = tc_str.split("+")
+    return (time_control_type(int(initial_str), int(increment_str)),int(initial_str), int(increment_str))
 
 
 class DatabaseSessionManager:
@@ -246,9 +309,32 @@ def evaluate_game(game: pgn.Game, config: EngineConfig, *, offset: int) -> GameR
 
 def worker_initialize(engine_config: EngineConfig | None) -> None:
     """Optional initializer executed once per worker process."""
-    # TODO: Pre-warm engines or database connections if sharing is safe
-    if engine_config:
-        logger.debug("Worker initializing engine resources: %s", engine_config)
+    global _ENGINE  # noqa: PLW0603
+    if engine_config is None:
+        return
+    if _ENGINE is not None:
+        return
+
+    logger.debug("Worker initializing engine resources: %s", engine_config)
+    _ENGINE = engine.SimpleEngine.popen_uci(str(engine_config.executable_path))
+    _ENGINE.configure(
+        {
+            "Threads": engine_config.config_threads,
+            "Hash": engine_config.config_hash_mb,
+            "UCI_ShowWDL": engine_config.config_show_wdl,
+        },
+    )
+
+    def _cleanup() -> None:
+        try:
+            global _ENGINE  # noqa: PLW0602
+            if _ENGINE is not None:
+                _ENGINE.quit()
+                logger.debug("Worker engine shut down successfully")
+        except Exception:
+            logger.exception("Failed to quit engine on worker shutdown")
+
+    atexit.register(_cleanup)
 
 
 def worker_process(
