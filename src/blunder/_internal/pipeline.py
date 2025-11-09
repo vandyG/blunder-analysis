@@ -8,12 +8,11 @@ with concrete implementations that suit your environment.
 
 from __future__ import annotations
 
-import atexit
 import json
 import logging
 import os
 import tempfile
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -38,8 +37,6 @@ except ImportError:  # pragma: no cover - optional dependency guard
     tqdm = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
-_ENGINE: engine.SimpleEngine | None = None
-
 
 @dataclass(slots=True)
 class EngineConfig:
@@ -142,11 +139,38 @@ def time_control_type(initial_time: int, increment: int) -> pgn.TimeControlType:
 
 def parse_time_control(tc_str: str) -> tuple[pgn.TimeControlType, int, int]:
     """Parse a time control string into initial time and increment in seconds."""
-    if tc_str == "unlimited":
+    tc = (tc_str or "").strip()
+    # Common sentinel values indicating no classical time control
+    if not tc or tc.lower() in ("unlimited", "-", "?", "*"):
         return (pgn.TimeControlType.UNLIMITED, 0, 0)
 
-    initial_str, increment_str = tc_str.split("+")
-    return (time_control_type(int(initial_str), int(increment_str)), int(initial_str), int(increment_str))
+    # Standard "initial+increment" form
+    if "+" in tc:
+        try:
+            initial_str, increment_str = tc.split("+", 1)
+            initial = int(initial_str)
+            increment = int(increment_str)
+            return (time_control_type(initial, increment), initial, increment)
+        except Exception:
+            logger.warning("Malformed time control '%s'; falling back to UNLIMITED", tc)
+            return (pgn.TimeControlType.UNLIMITED, 0, 0)
+
+    # Single number like "300" -> treat as initial seconds with 0 increment
+    if tc.isdigit():
+        initial = int(tc)
+        return (time_control_type(initial, 0), initial, 0)
+
+    # Try best-effort extraction (e.g., weird annotations)
+    import re
+
+    m = re.search(r"(\d+)(?:\D+(\d+))?", tc)
+    if m:
+        initial = int(m.group(1))
+        increment = int(m.group(2)) if m.group(2) else 0
+        return (time_control_type(initial, increment), initial, increment)
+
+    logger.warning("Unrecognized time control '%s'; treating as UNLIMITED", tc)
+    return (pgn.TimeControlType.UNLIMITED, 0, 0)
 
 
 class ParquetWriter:
@@ -306,13 +330,19 @@ class OffsetCheckpoint:
             logger.info(f"Skipping {skipped} games at or below checkpoint offset {self.value}")
         return offsets[mask]
 
-    def update_from_records(self, records: Sequence[GameRecord]) -> None:
-        """Advance the checkpoint when a batch is successfully persisted."""
-        if not records:
-            return
-        batch_max = max(record.offset for record in records)
-        if self.value is None or batch_max > self.value:
-            self.value = batch_max
+    # def update_from_records(self, records: Sequence[GameRecord]) -> None:
+    #     """Advance the checkpoint when a batch is successfully persisted."""
+    #     if not records:
+    #         return
+    #     batch_max = max(record.offset for record in records)
+    #     if self.value is None or batch_max > self.value:
+    #         self.value = batch_max
+    #         self._write()
+
+    def update_from_max_offset(self, max_offset: int) -> None:  # NEW: Simpler signature
+        """Advance checkpoint when a batch is successfully written."""
+        if self.value is None or max_offset > self.value:
+            self.value = max_offset
             self._write()
 
     def _write(self) -> None:
@@ -388,7 +418,7 @@ def _read_single_game(handle: TextIO) -> str | None:
     raise NotImplementedError("_read_single_game must be implemented")
 
 
-def parse_game(game: pgn.Game, engine_limit: engine.Limit, engine_info: engine.Info) -> GameRecord:
+def parse_game(game: pgn.Game, chess_engine: engine.SimpleEngine, engine_limit: engine.Limit, engine_info: engine.Info) -> GameRecord:
     """Parse raw PGN text into a ``chess.pgn.Game`` object."""
     board = game.board()
     node = game
@@ -422,7 +452,7 @@ def parse_game(game: pgn.Game, engine_limit: engine.Limit, engine_info: engine.I
         termination=termination,
     )
 
-    info_before = _ENGINE.analyse(board, engine_limit, info=engine_info)  # type: ignore  # noqa: PGH003
+    info_before = chess_engine.analyse(board, engine_limit, info=engine_info)  # type: ignore  # noqa: PGH003
     score_before = info_before.get("score")
 
     if not score_before:
@@ -447,7 +477,7 @@ def parse_game(game: pgn.Game, engine_limit: engine.Limit, engine_info: engine.I
         board.push(move)
 
         # Position after move
-        info_after = _ENGINE.analyse(board, engine_limit, info=engine_info)  # type: ignore  # noqa: PGH003
+        info_after = chess_engine.analyse(board, engine_limit, info=engine_info)  # type: ignore  # noqa: PGH003
         score_after = info_after.get("score")
         if not score_after:
             raise ValueError("Engine did not return a score after move")
@@ -487,17 +517,14 @@ def evaluate_game(game: pgn.Game, config: EngineConfig, *, offset: int) -> GameR
     raise NotImplementedError("evaluate_game must be implemented")
 
 
-def worker_initialize(engine_config: EngineConfig | None) -> None:
+def worker_initialize(engine_config: EngineConfig | None) -> engine.SimpleEngine:
     """Optional initializer executed once per worker process."""
-    global _ENGINE  # noqa: PLW0603
     if engine_config is None:
-        return
-    if _ENGINE is not None:
-        return
+        raise NotImplementedError("Engine configuration is required")
 
     logger.debug("Worker initializing engine resources: %s", engine_config)
-    _ENGINE = engine.SimpleEngine.popen_uci(str(engine_config.executable_path))
-    _ENGINE.configure(
+    stockfish = engine.SimpleEngine.popen_uci(str(engine_config.executable_path))
+    stockfish.configure(
         {
             "Threads": engine_config.config_threads,
             "Hash": engine_config.config_hash_mb,
@@ -505,26 +532,23 @@ def worker_initialize(engine_config: EngineConfig | None) -> None:
         },
     )
 
-    def _cleanup() -> None:
-        try:
-            global _ENGINE  # noqa: PLW0602
-            if _ENGINE is not None:
-                _ENGINE.quit()
-                logger.debug("Worker engine shut down successfully")
-        except Exception:
-            logger.exception("Failed to quit engine on worker shutdown")
-
-    atexit.register(_cleanup)
+    return stockfish
 
 
 def worker_process(
     pgn_path: Path,
     offsets: Sequence[int],
     engine_config: EngineConfig | None,
-) -> list[tuple[int, GameRecord]]:
-    """Process a batch of games and return structured results."""
+    parquet_writer: ParquetWriter,  # NEW: Pass writer instance
+    worker_id: int,  # NEW: For unique filenames
+) -> tuple[int, Path, int]:  # NEW: Return (game_count, output_path, max_offset)
+    """Process batch and write directly to Parquet from worker.
+
+    Returns:
+        Tuple of (game_count, output_path, max_offset_in_batch)
+    """
     if engine_config is None:
-        raise NotImplementedError("Engine configuration is required for worker processing")
+        raise NotImplementedError("Engine configuration is required")
 
     try:
         min_offset = offsets[0]
@@ -532,6 +556,8 @@ def worker_process(
         logger.debug(f"Worker processing offsets: first={min_offset} last={max_offset} count={len(offsets)}")
 
         records: list[tuple[int, GameRecord]] = []
+
+        stockfish = worker_initialize(engine_config)
 
         with open(pgn_path, encoding="utf-8") as handle:
             handle.seek(min_offset)
@@ -546,67 +572,95 @@ def worker_process(
                     continue
                 engine_limit = engine.Limit(depth=engine_config.depth)
                 engine_info = engine_config.info
-                parsed_game = parse_game(curr_game, engine_limit, engine_info)
+                parsed_game = parse_game(curr_game, stockfish, engine_limit, engine_info)
                 records.append((curr_offset, parsed_game))
+
+            output_path, batch_max_offset = parquet_writer.write_batch(records, worker_id)
+            stockfish.quit()
+            return len(records), output_path, batch_max_offset
+
     except Exception:
         logger.exception("Worker failed while processing offsets: first=%s", offsets[0])
         raise
-    else:
-        return records
 
 
-def process_batches(config: ProcessingConfig, offsets: np.ndarray) -> Iterator[list[GameRecord]]:
-    """Dispatch offset batches across worker processes and stream results."""
+def process_batches(
+    config: ProcessingConfig,
+    offsets: np.ndarray,
+) -> Iterator[tuple[int, Path, int]]:  # NEW: Return (game_count, path, max_offset)
+    """Dispatch batches with workers writing their own Parquet files."""
     engine_config = config.engine
-    worker_fn = partial(worker_process, config.pgn_path, engine_config=engine_config)
+    parquet_writer = ParquetWriter(
+        config.output_parquet_dir,
+        config.parquet_compression,
+        config.parquet_row_group_size,
+    )
+
+    worker_fn = partial(
+        worker_process,
+        config.pgn_path,
+        engine_config=engine_config,
+        parquet_writer=parquet_writer,
+    )
 
     with ProcessPoolExecutor(
         max_workers=config.workers,
-        initializer=worker_initialize,
-        initargs=(engine_config,),
     ) as pool:
         futures = []
-        for batch_offsets in chunk_offsets(offsets, config.batch_size):
-            futures.append(pool.submit(worker_fn, batch_offsets.tolist()))
-        for future in futures:
+        for worker_id, batch_offsets in enumerate(chunk_offsets(offsets, config.batch_size)):
+            futures.append(pool.submit(worker_fn, batch_offsets.tolist(), worker_id=worker_id))
+
+        for future in as_completed(futures):
             yield future.result()
 
 
-def persist_results(
-    records_iter: Iterable[list[GameRecord]],
-    db_manager: DatabaseSessionManager,
-    checkpoint: OffsetCheckpoint | None = None,
-) -> None:
-    """Consume processed records and persist them to the database in batches."""
-    for records in records_iter:
-        if not records:
-            continue
-        logger.debug("Persisting %d records", len(records))
-        db_manager.insert_batch(records)
-        if checkpoint is not None:
-            checkpoint.update_from_records(records)
+# def persist_results(
+#     records_iter: Iterable[list[GameRecord]],
+#     db_manager: DatabaseSessionManager,
+#     checkpoint: OffsetCheckpoint | None = None,
+# ) -> None:
+#     """Consume processed records and persist them to the database in batches."""
+#     for records in records_iter:
+#         if not records:
+#             continue
+#         logger.debug("Persisting %d records", len(records))
+#         db_manager.insert_batch(records)
+#         if checkpoint is not None:
+#             checkpoint.update_from_records(records)
 
 
 def report_progress(
-    iterable: Iterable[list[GameRecord]],
+    iterable: Iterable[tuple[int, Path]],  # NEW: Accept (game_count, path)
     total: int,
     *,
     show_progress: bool,
-) -> Iterator[list[GameRecord]]:
-    """Wrap an iterable with a progress reporter when enabled."""
+) -> Iterator[tuple[int, Path]]:
+    """Wrap iterable with progress reporter when enabled."""
     if not show_progress:
         yield from iterable
         return
 
     if tqdm is None:
-        logger.warning("tqdm is unavailable; proceeding without progress bar")
+        logger.warning("tqdm unavailable; no progress bar")
         yield from iterable
         return
 
     with tqdm(total=total, unit="game", desc="Processing") as progress:
-        for batch in iterable:
-            progress.update(len(batch))
-            yield batch
+        for game_count, path in iterable:
+            progress.update(game_count)
+            yield game_count, path
+
+
+def track_results(
+    results_iter: Iterable[tuple[int, Path, int]],  # NEW: (game_count, path, max_offset)
+    checkpoint: OffsetCheckpoint | None = None,
+) -> Iterator[tuple[int, Path]]:  # Yield for progress tracking
+    """Track Parquet writes and update checkpoint."""
+    for game_count, output_path, max_offset in results_iter:
+        logger.debug(f"Batch written: {game_count} games → {output_path}")
+        if checkpoint is not None:
+            checkpoint.update_from_max_offset(max_offset)
+        yield game_count, output_path
 
 
 def run_pipeline(config: ProcessingConfig) -> None:
@@ -628,14 +682,45 @@ def run_pipeline(config: ProcessingConfig) -> None:
         logger.info("No new games to process; exiting")
         return
 
-    db_manager = DatabaseSessionManager(config.database_url)
-    db_manager.initialize()
+    # REMOVE: db_manager = DatabaseSessionManager(...)
+    # REMOVE: db_manager.initialize()
 
-    record_batches = process_batches(config, offsets)
-    record_batches = report_progress(record_batches, total_games, show_progress=config.show_progress)
-    persist_results(record_batches, db_manager, checkpoint)
+    result_batches = process_batches(config, offsets)  # Returns (count, path, max_offset)
+    result_batches = track_results(result_batches, checkpoint)  # Update checkpoint
+    result_batches = report_progress(result_batches, total_games, show_progress=config.show_progress)
+
+    # Consume iterator to execute pipeline
+    output_files = list(result_batches)
 
     logger.info("Pipeline completed successfully")
+    logger.info(f"Wrote {len(output_files)} Parquet files to {config.output_parquet_dir}")
+
+
+def consolidate_parquet_files(
+    input_dir: Path,
+    output_dir: Path,
+    partition_cols: list[str] | None = None,
+) -> None:
+    """Merge worker-specific files into partitioned dataset (optional post-processing)."""
+    try:
+        import polars as pl  # noqa: PLC0415
+    except ImportError:
+        logger.warning("polars not installed; skipping consolidation")
+        return
+
+    logger.info(f"Consolidating Parquet files from {input_dir}")
+    df = pl.scan_parquet(f"{input_dir}/*.parquet")
+
+    if partition_cols:
+        df.sink_parquet(
+            pl.PartitionByKey(output_dir, by=partition_cols),
+            compression="zstd",
+            row_group_size=100_000,
+        )
+    else:
+        df.sink_parquet(output_dir, compression="zstd")
+
+    logger.info(f"Consolidated dataset written to {output_dir}")
 
 
 def main(pgn_path: Path, idx_path: Path | None, engine_path: Path) -> None:
@@ -645,4 +730,26 @@ def main(pgn_path: Path, idx_path: Path | None, engine_path: Path) -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover - import-side execution guard
-    raise SystemExit("The pipeline module exposes no standalone CLI entry point.")
+    # raise SystemExit("The pipeline module exposes no standalone CLI entry point.")
+    pgn_path = Path("/home/vandy/Work/MATH6310/blunder-analysis/data/raw/lichess_db_standard_rated_2025-08.pgn")
+    index_path = Path("/home/vandy/Work/MATH6310/blunder-analysis/data/raw/lichess_db_standard_rated_2025-08.idx")
+
+    engine_path = os.environ.get("STOCKFISH_PATH", "")
+    engine_config = EngineConfig(executable_path=Path(engine_path))
+    engine_config.config_hash_mb = 2048
+    engine_config.config_threads = 2
+    engine_config.depth = 14
+
+    config = ProcessingConfig(
+        pgn_path=pgn_path,
+        index_path=index_path,
+        workers=1,
+        batch_size=64,
+        max_games=64,
+        resume_from_checkpoint=False,
+        engine=engine_config,
+        output_parquet_dir=Path("/home/vandy/Work/MATH6310/blunder-analysis/data/silver"),
+        checkpoint_path=Path("/home/vandy/Work/MATH6310/blunder-analysis/data/checkpoint/test/checkpoint.json"),
+    )
+
+    run_pipeline(config)
