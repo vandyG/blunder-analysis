@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, TextIO, cast
 
 import chess
 import numpy as np
@@ -48,8 +48,8 @@ class EngineConfig:
     config_multipv: int = 1
     config_ponder: bool = False
     config_show_wdl: bool = True
-    limit_depth: int = 14
-    limit_info: engine.Info = field(default_factory=lambda: engine.INFO_SCORE)
+    depth: int = 14
+    info: engine.Info = field(default_factory=lambda: engine.INFO_SCORE)
     # TODO: Add any other engine-specific options you need
 
 
@@ -70,11 +70,11 @@ class ProcessingConfig:
     resume_from_checkpoint: bool = True
     # TODO: Add tuning parameters (e.g., time management, pruning strategy)
 
+
 @dataclass(slots=True)
 class GameRecord:
     """Container for processed game data destined for the database writer."""
 
-    offset: int
     game_id: str
     site: str
     white_elo: int
@@ -92,14 +92,11 @@ class GameRecord:
         """Append a move while parsing the game incrementally."""
         self.moves.append(move)
 
-    def finalize(self, outcome: chess.Outcome) -> None:
-        """Set final attributes once parsing/analysis is complete."""
-        if outcome is not None:
-            self.outcome = outcome
 
 @dataclass(slots=True)
 class MoveRecord:
     """Container for processed move data within a game."""
+
     turn: chess.Color
     move: str
     fullmove_number: int
@@ -107,13 +104,13 @@ class MoveRecord:
     winning_chance: float
     drawing_chance: float
     losing_chance: float
-    piece_moved: chess.Piece
+    piece_moved: chess.PieceType
     board_fen: str
     is_check: bool
-    mate_in: int | None
+    mate_in: float | None
     clock: float
     eval_delta: int
-    emt: float
+
 
 def time_control_type(initial_time: int, increment: int) -> pgn.TimeControlType:
     """Determine time control category by estimated total time (seconds).
@@ -134,13 +131,14 @@ def time_control_type(initial_time: int, increment: int) -> pgn.TimeControlType:
         return pgn.TimeControlType.RAPID
     return pgn.TimeControlType.STANDARD
 
+
 def parse_time_control(tc_str: str) -> tuple[pgn.TimeControlType, int, int]:
     """Parse a time control string into initial time and increment in seconds."""
     if tc_str == "unlimited":
         return (pgn.TimeControlType.UNLIMITED, 0, 0)
 
     initial_str, increment_str = tc_str.split("+")
-    return (time_control_type(int(initial_str), int(increment_str)),int(initial_str), int(increment_str))
+    return (time_control_type(int(initial_str), int(increment_str)), int(initial_str), int(increment_str))
 
 
 class DatabaseSessionManager:
@@ -295,10 +293,90 @@ def _read_single_game(handle: TextIO) -> str | None:
     raise NotImplementedError("_read_single_game must be implemented")
 
 
-def parse_games(raw_games: Sequence[str]) -> list[pgn.Game]:
-    """Parse raw PGN text into ``chess.pgn.Game`` objects."""
-    # TODO: Implement parsing using chess.pgn.read_game over StringIO buffers
-    raise NotImplementedError("parse_games must be implemented")
+def parse_game(game: pgn.Game, engine_limit: engine.Limit, engine_info: engine.Info) -> GameRecord:
+    """Parse raw PGN text into a ``chess.pgn.Game`` object."""
+    board = game.board()
+    node = game
+
+    site = game.headers.get("Site", "")
+    game_id = site.split("/")[-1]
+    white_elo = int(game.headers.get("WhiteElo", "0"))
+    black_elo = int(game.headers.get("BlackElo", "0"))
+    white_rating_diff = int(game.headers.get("WhiteRatingDiff", "0"))
+    black_rating_diff = int(game.headers.get("BlackRatingDiff", "0"))
+    eco = game.headers.get("ECO", "")
+    time_control_type, game_time, increment = parse_time_control(game.headers.get("TimeControl", ""))
+
+    record = GameRecord(
+        game_id=game_id,
+        site=site,
+        white_elo=white_elo,
+        black_elo=black_elo,
+        white_rating_diff=white_rating_diff,
+        black_rating_diff=black_rating_diff,
+        eco=eco,
+        time_control=time_control_type,
+        game_time=game_time,
+        increment=increment,
+    )
+
+    info_before = _ENGINE.analyse(board, engine_limit, info=engine_info)  # type: ignore
+    score_before = info_before.get("score")
+
+    if not score_before:
+        raise ValueError("Engine did not return a score for the initial position")
+
+    score_before_w = score_before.white().score(mate_score=100000)
+    logger.debug(f"Initial position score: {score_before_w}")
+
+    for node in game.mainline():
+        move = node.move
+        move_num = board.fullmove_number
+        move_san = board.san(move)
+        turn = board.turn
+        logger.debug(f"Analyzing move {move_num}.{'w' if turn else 'b'}: {move_san}")
+
+        wdl_obj = info_before.get("wdl")
+        wdl_before = wdl_obj.white() if wdl_obj else engine.Wdl(0, 1000, 0)
+        logger.debug(
+            f"WDL before move: W={wdl_before.winning_chance():.2%}, D={wdl_before.drawing_chance():.2%}, L={wdl_before.losing_chance():.2%}"
+        )
+
+        board.push(move)
+
+        # Position after move
+        info_after = _ENGINE.analyse(board, engine_limit, info=engine_info)  # type: ignore
+        score_after = info_after.get("score")
+        if not score_after:
+            raise ValueError("Engine did not return a score after move")
+        score_after_w = score_after.white().score(mate_score=100000)
+        mate = score_after.white().mate()
+        mate_in = float(mate) if mate else float("inf")
+        clock = node.clock()
+        piece_moved = cast("chess.Piece", board.piece_at(move.to_square))
+        board_fen = board.board_fen()
+        is_check = board.is_check()
+        eval_delta = score_after_w - score_before_w
+
+        move_record = MoveRecord(
+            turn=turn,
+            move=move_san,
+            fullmove_number=move_num,
+            cp_score=score_after_w,
+            winning_chance=wdl_before.winning_chance(),
+            drawing_chance=wdl_before.drawing_chance(),
+            losing_chance=wdl_before.losing_chance(),
+            piece_moved=piece_moved.piece_type,
+            board_fen=board_fen,
+            is_check=is_check,
+            mate_in=mate_in,
+            clock=clock,  # type: ignore  # noqa: PGH003
+            eval_delta=eval_delta,
+        )
+
+        record.add_move(move_record)
+
+    return record
 
 
 def evaluate_game(game: pgn.Game, config: EngineConfig, *, offset: int) -> GameRecord:
@@ -341,24 +419,33 @@ def worker_process(
     pgn_path: Path,
     offsets: Sequence[int],
     engine_config: EngineConfig | None,
-) -> list[GameRecord]:
+) -> list[tuple[int, GameRecord]]:
     """Process a batch of games and return structured results."""
     if engine_config is None:
         raise NotImplementedError("Engine configuration is required for worker processing")
 
     try:
-        raw_games = read_games_by_offsets(pgn_path, offsets)
-        parsed_games = parse_games(raw_games)
-        records: list[GameRecord] = []
-        if len(parsed_games) != len(offsets):
-            logger.warning(
-                "Parsed %d games but received %d offsets; truncating to shortest",
-                len(parsed_games),
-                len(offsets),
-            )
-        for offset, game in zip(offsets, parsed_games):
-            record = evaluate_game(game, engine_config, offset=int(offset))
-            records.append(record)
+        min_offset = offsets[0]
+        max_offset = offsets[-1]
+        logger.debug(f"Worker processing offsets: first={min_offset} last={max_offset} count={len(offsets)}")
+
+        records: list[tuple[int, GameRecord]] = []
+
+        with open(pgn_path, encoding="utf-8") as handle:
+            handle.seek(min_offset)
+            while handle.tell() <= max_offset:
+                curr_offset = handle.tell()
+                curr_game = pgn.read_game(handle)
+                if curr_game is None:
+                    logger.debug(f"Reached EOF while reading games up to offset {max_offset}")
+                    break
+                if curr_game.errors:
+                    logger.warning(f"Encountered errors in game at offset {curr_offset}: {curr_game.errors}")
+                    continue
+                engine_limit = engine.Limit(depth=engine_config.depth)
+                engine_info = engine_config.info
+                parsed_game = parse_game(curr_game, engine_limit, engine_info)
+                records.append((curr_offset, parsed_game))
     except Exception:
         logger.exception("Worker failed while processing offsets: first=%s", offsets[0])
         raise
