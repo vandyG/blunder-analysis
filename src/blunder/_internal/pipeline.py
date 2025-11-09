@@ -85,8 +85,9 @@ class GameRecord:
     time_control: pgn.TimeControlType
     game_time: int
     increment: int
+    result: int
+    termination: str
     moves: list[MoveRecord] = field(default_factory=list)
-    outcome: chess.Outcome | None = None
 
     def add_move(self, move: MoveRecord) -> None:
         """Append a move while parsing the game incrementally."""
@@ -306,6 +307,11 @@ def parse_game(game: pgn.Game, engine_limit: engine.Limit, engine_info: engine.I
     black_rating_diff = int(game.headers.get("BlackRatingDiff", "0"))
     eco = game.headers.get("ECO", "")
     time_control_type, game_time, increment = parse_time_control(game.headers.get("TimeControl", ""))
+    termination = game.headers.get("Termination", "")
+
+    result_str = game.headers.get("Result", "")
+    result_map = {"1-0": 1, "0-1": -1, "1/2-1/2": 0}
+    result = result_map.get(result_str, 0)
 
     record = GameRecord(
         game_id=game_id,
@@ -318,9 +324,11 @@ def parse_game(game: pgn.Game, engine_limit: engine.Limit, engine_info: engine.I
         time_control=time_control_type,
         game_time=game_time,
         increment=increment,
+        result=result,
+        termination=termination,
     )
 
-    info_before = _ENGINE.analyse(board, engine_limit, info=engine_info)  # type: ignore
+    info_before = _ENGINE.analyse(board, engine_limit, info=engine_info)  # type: ignore  # noqa: PGH003
     score_before = info_before.get("score")
 
     if not score_before:
@@ -339,13 +347,13 @@ def parse_game(game: pgn.Game, engine_limit: engine.Limit, engine_info: engine.I
         wdl_obj = info_before.get("wdl")
         wdl_before = wdl_obj.white() if wdl_obj else engine.Wdl(0, 1000, 0)
         logger.debug(
-            f"WDL before move: W={wdl_before.winning_chance():.2%}, D={wdl_before.drawing_chance():.2%}, L={wdl_before.losing_chance():.2%}"
+            f"WDL before move: W={wdl_before.winning_chance():.2%}, D={wdl_before.drawing_chance():.2%}, L={wdl_before.losing_chance():.2%}",
         )
 
         board.push(move)
 
         # Position after move
-        info_after = _ENGINE.analyse(board, engine_limit, info=engine_info)  # type: ignore
+        info_after = _ENGINE.analyse(board, engine_limit, info=engine_info)  # type: ignore  # noqa: PGH003
         score_after = info_after.get("score")
         if not score_after:
             raise ValueError("Engine did not return a score after move")
