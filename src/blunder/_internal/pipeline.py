@@ -16,12 +16,15 @@ import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, TextIO, cast
+from typing import TYPE_CHECKING, Any, TextIO, cast
 
 import chess
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 from chess import engine, pgn
 
 from blunder._internal.util import discover_offsets, load_offsets
@@ -65,7 +68,11 @@ class ProcessingConfig:
     show_progress: bool = True
     chunk_size: int = 8192
     engine: EngineConfig | None = None
-    database_url: str = "sqlite:///analysis.db"
+    # database_url: str = "sqlite:///analysis.db"
+    output_parquet_dir: Path = Path("analysis_data")  # NEW: Replace database_url
+    parquet_partition_cols: list[str] = field(default_factory=lambda: ["time_control"])  # NEW
+    parquet_compression: str = "zstd"  # NEW: Better than snappy for text data
+    parquet_row_group_size: int = 100_000  # NEW: Tune for query patterns
     checkpoint_path: Path | None = None
     resume_from_checkpoint: bool = True
     # TODO: Add tuning parameters (e.g., time management, pruning strategy)
@@ -140,6 +147,93 @@ def parse_time_control(tc_str: str) -> tuple[pgn.TimeControlType, int, int]:
 
     initial_str, increment_str = tc_str.split("+")
     return (time_control_type(int(initial_str), int(increment_str)), int(initial_str), int(increment_str))
+
+
+class ParquetWriter:
+    """Manages writing game records to worker-specific Parquet files."""
+
+    def __init__(
+        self,
+        output_dir: Path,
+        compression: str = "zstd",
+        row_group_size: int = 100_000,
+    ) -> None:
+        self.output_dir = output_dir
+        self.compression = compression
+        self.row_group_size = row_group_size
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _flatten_records(self, records: Sequence[tuple[int, GameRecord]]) -> list[dict[str, Any]]:
+        """Convert nested GameRecord structure to flat columnar rows."""
+        rows = []
+        for offset, game in records:
+            for move in game.moves:
+                rows.append(
+                    {
+                        # Game-level metadata (repeated per move)
+                        "offset": offset,
+                        "game_id": game.game_id,
+                        "site": game.site,
+                        "white_elo": game.white_elo,
+                        "black_elo": game.black_elo,
+                        "white_rating_diff": game.white_rating_diff,
+                        "black_rating_diff": game.black_rating_diff,
+                        "eco": game.eco,
+                        "time_control": game.time_control.value,
+                        "game_time": game.game_time,
+                        "increment": game.increment,
+                        "result": game.result,
+                        "termination": game.termination,
+                        # Move-level data
+                        "turn": "white" if move.turn == chess.WHITE else "black",
+                        "move": move.move,
+                        "fullmove_number": move.fullmove_number,
+                        "cp_score": move.cp_score,
+                        "winning_chance": move.winning_chance,
+                        "drawing_chance": move.drawing_chance,
+                        "losing_chance": move.losing_chance,
+                        "piece_moved": move.piece_moved,
+                        "board_fen": move.board_fen,
+                        "is_check": move.is_check,
+                        "mate_in": move.mate_in,
+                        "clock": move.clock,
+                        "eval_delta": move.eval_delta,
+                    },
+                )
+        return rows
+
+    def write_batch(self, records: Sequence[tuple[int, GameRecord]], worker_id: int) -> tuple[Path, int]:
+        """Write batch to worker-specific Parquet file.
+
+        Returns:
+            Tuple of (output_path, max_offset_in_batch)
+        """
+        if not records:
+            raise ValueError("Cannot write empty batch")
+
+        rows = self._flatten_records(records)
+        table = pa.Table.from_pylist(rows)
+
+        # Worker-specific filename to avoid conflicts
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+        first_offset = records[0][0]
+        filename = f"batch_w{worker_id:02d}_{timestamp}_{first_offset}.parquet"
+        output_path = self.output_dir / filename
+
+        pq.write_table(
+            table,
+            output_path,
+            compression=self.compression,
+            use_dictionary=True,  # Excellent for repeated strings (ECO, FEN prefixes)
+            write_statistics=True,  # Enable predicate pushdown
+            row_group_size=self.row_group_size,
+        )
+
+        max_offset = max(record[0] for record in records)
+        logger.debug(
+            f"Worker {worker_id}: Wrote {len(rows)} moves from {len(records)} games to {output_path}",
+        )
+        return output_path, max_offset
 
 
 class DatabaseSessionManager:
