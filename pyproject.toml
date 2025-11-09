@@ -31,6 +31,8 @@ classifiers = [
 dependencies = [
     "chess>=1.11.2",
     "numpy>=2.0.2",
+    "polars>=1.35.1",
+    "pyarrow>=22.0.0",
     "tqdm>=4.67.1",
     "typer>=0.20.0",
 ]
