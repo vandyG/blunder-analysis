@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TextIO, cast
+from typing import TYPE_CHECKING, Any, TextIO
 
 import chess
 import numpy as np
@@ -187,46 +187,7 @@ class ParquetWriter:
         self.row_group_size = row_group_size
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _flatten_records(self, records: Sequence[tuple[int, GameRecord]]) -> list[dict[str, Any]]:
-        """Convert nested GameRecord structure to flat columnar rows."""
-        rows = []
-        for offset, game in records:
-            for move in game.moves:
-                rows.append(
-                    {
-                        # Game-level metadata (repeated per move)
-                        "offset": offset,
-                        "game_id": game.game_id,
-                        "site": game.site,
-                        "white_elo": game.white_elo,
-                        "black_elo": game.black_elo,
-                        "white_rating_diff": game.white_rating_diff,
-                        "black_rating_diff": game.black_rating_diff,
-                        "eco": game.eco,
-                        "time_control": game.time_control.value,
-                        "game_time": game.game_time,
-                        "increment": game.increment,
-                        "result": game.result,
-                        "termination": game.termination,
-                        # Move-level data
-                        "turn": "white" if move.turn == chess.WHITE else "black",
-                        "move": move.move,
-                        "fullmove_number": move.fullmove_number,
-                        "cp_score": move.cp_score,
-                        "winning_chance": move.winning_chance,
-                        "drawing_chance": move.drawing_chance,
-                        "losing_chance": move.losing_chance,
-                        "piece_moved": move.piece_moved,
-                        "board_fen": move.board_fen,
-                        "is_check": move.is_check,
-                        "mate_in": move.mate_in,
-                        "clock": move.clock,
-                        "eval_delta": move.eval_delta,
-                    },
-                )
-        return rows
-
-    def write_batch(self, records: Sequence[tuple[int, GameRecord]], worker_id: int) -> tuple[Path, int]:
+    def write_batch(self, records: Sequence[dict[str, Any]], worker_id: int) -> tuple[Path, int]:
         """Write batch to worker-specific Parquet file.
 
         Returns:
@@ -235,12 +196,11 @@ class ParquetWriter:
         if not records:
             raise ValueError("Cannot write empty batch")
 
-        rows = self._flatten_records(records)
-        table = pa.Table.from_pylist(rows)
+        table = pa.Table.from_pylist(records)
 
         # Worker-specific filename to avoid conflicts
         timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
-        first_offset = records[0][0]
+        first_offset = records[0]["offset"]
         filename = f"batch_w{worker_id:02d}_{timestamp}_{first_offset}.parquet"
         output_path = self.output_dir / filename
 
@@ -253,9 +213,10 @@ class ParquetWriter:
             row_group_size=self.row_group_size,
         )
 
-        max_offset = max(record[0] for record in records)
+        max_offset = max(record["offset"] for record in records)
+        game_total = len({record["offset"] for record in records})
         logger.debug(
-            f"Worker {worker_id}: Wrote {len(rows)} moves from {len(records)} games to {output_path}",
+            f"Worker {worker_id}: Wrote {len(records)} moves from {game_total} games to {output_path}",
         )
         return output_path, max_offset
 
@@ -418,10 +379,15 @@ def _read_single_game(handle: TextIO) -> str | None:
     raise NotImplementedError("_read_single_game must be implemented")
 
 
-def parse_game(game: pgn.Game, chess_engine: engine.SimpleEngine, engine_limit: engine.Limit, engine_info: engine.Info) -> GameRecord:
-    """Parse raw PGN text into a ``chess.pgn.Game`` object."""
+def parse_game(
+    game: pgn.Game,
+    offset: int,
+    chess_engine: engine.SimpleEngine,
+    engine_limit: engine.Limit,
+    engine_info: engine.Info,
+) -> list[dict[str, Any]]:
+    """Parse a PGN game into per-move dictionaries with duplicated game metadata."""
     board = game.board()
-    node = game
 
     site = game.headers.get("Site", "")
     game_id = site.split("/")[-1]
@@ -437,20 +403,7 @@ def parse_game(game: pgn.Game, chess_engine: engine.SimpleEngine, engine_limit: 
     result_map = {"1-0": 1, "0-1": -1, "1/2-1/2": 0}
     result = result_map.get(result_str, 0)
 
-    record = GameRecord(
-        game_id=game_id,
-        site=site,
-        white_elo=white_elo,
-        black_elo=black_elo,
-        white_rating_diff=white_rating_diff,
-        black_rating_diff=black_rating_diff,
-        eco=eco,
-        time_control=time_control_type,
-        game_time=game_time,
-        increment=increment,
-        result=result,
-        termination=termination,
-    )
+    rows: list[dict[str, Any]] = []
 
     info_before = chess_engine.analyse(board, engine_limit, info=engine_info)  # type: ignore  # noqa: PGH003
     score_before = info_before.get("score")
@@ -485,30 +438,46 @@ def parse_game(game: pgn.Game, chess_engine: engine.SimpleEngine, engine_limit: 
         mate = score_after.white().mate()
         mate_in = float(mate) if mate else float("inf")
         clock = node.clock()
-        piece_moved = cast("chess.Piece", board.piece_at(move.to_square))
+        piece_moved = board.piece_at(move.to_square)
         board_fen = board.board_fen()
         is_check = board.is_check()
         eval_delta = score_after_w - score_before_w
 
-        move_record = MoveRecord(
-            turn=turn,
-            move=move_san,
-            fullmove_number=move_num,
-            cp_score=score_after_w,
-            winning_chance=wdl_before.winning_chance(),
-            drawing_chance=wdl_before.drawing_chance(),
-            losing_chance=wdl_before.losing_chance(),
-            piece_moved=piece_moved.piece_type,
-            board_fen=board_fen,
-            is_check=is_check,
-            mate_in=mate_in,
-            clock=clock,  # type: ignore  # noqa: PGH003
-            eval_delta=eval_delta,
+        rows.append(
+            {
+                "game_id": game_id,
+                "offset": offset,
+                "site": site,
+                "white_elo": white_elo,
+                "black_elo": black_elo,
+                "white_rating_diff": white_rating_diff,
+                "black_rating_diff": black_rating_diff,
+                "eco": eco,
+                "time_control": time_control_type.value,
+                "game_time": game_time,
+                "increment": increment,
+                "result": result,
+                "termination": termination,
+                "turn": turn,
+                "move": move_san,
+                "fullmove_number": move_num,
+                "cp_score": score_after_w,
+                "winning_chance": float(wdl_before.winning_chance()),
+                "drawing_chance": float(wdl_before.drawing_chance()),
+                "losing_chance": float(wdl_before.losing_chance()),
+                "piece_moved": piece_moved.piece_type if piece_moved else None,
+                "board_fen": board_fen,
+                "is_check": is_check,
+                "mate_in": mate_in,
+                "clock": float(clock) if clock is not None else None,
+                "eval_delta": eval_delta,
+            },
         )
 
-        record.add_move(move_record)
+        info_before = info_after
+        score_before_w = score_after_w
 
-    return record
+    return rows
 
 
 def evaluate_game(game: pgn.Game, config: EngineConfig, *, offset: int) -> GameRecord:
@@ -555,7 +524,8 @@ def worker_process(
         max_offset = offsets[-1]
         logger.debug(f"Worker processing offsets: first={min_offset} last={max_offset} count={len(offsets)}")
 
-        records: list[tuple[int, GameRecord]] = []
+        records: list[dict[str, Any]] = []
+        game_count = 0
 
         stockfish = worker_initialize(engine_config)
 
@@ -572,12 +542,15 @@ def worker_process(
                     continue
                 engine_limit = engine.Limit(depth=engine_config.depth)
                 engine_info = engine_config.info
-                parsed_game = parse_game(curr_game, stockfish, engine_limit, engine_info)
-                records.append((curr_offset, parsed_game))
+                parsed_moves = parse_game(curr_game, curr_offset,stockfish, engine_limit, engine_info)
+                if not parsed_moves:
+                    continue
+                records.extend(parsed_moves)
+                game_count += 1
 
             output_path, batch_max_offset = parquet_writer.write_batch(records, worker_id)
             stockfish.quit()
-            return len(records), output_path, batch_max_offset
+            return game_count, output_path, batch_max_offset
 
     except Exception:
         logger.exception("Worker failed while processing offsets: first=%s", offsets[0])
@@ -736,20 +709,20 @@ if __name__ == "__main__":  # pragma: no cover - import-side execution guard
 
     engine_path = os.environ.get("STOCKFISH_PATH", "")
     engine_config = EngineConfig(executable_path=Path(engine_path))
-    engine_config.config_hash_mb = 2048
-    engine_config.config_threads = 2
+    engine_config.config_hash_mb = 512
+    engine_config.config_threads = 1
     engine_config.depth = 14
 
     config = ProcessingConfig(
         pgn_path=pgn_path,
         index_path=index_path,
-        workers=1,
-        batch_size=64,
-        max_games=64,
-        resume_from_checkpoint=False,
+        workers=14,
+        batch_size=128,
+        max_games=55_000,
+        resume_from_checkpoint=True,
         engine=engine_config,
         output_parquet_dir=Path("/home/vandy/Work/MATH6310/blunder-analysis/data/silver"),
-        checkpoint_path=Path("/home/vandy/Work/MATH6310/blunder-analysis/data/checkpoint/test/checkpoint.json"),
+        checkpoint_path=Path("/home/vandy/Work/MATH6310/blunder-analysis/data/checkpoint/checkpoint.json"),
     )
 
     run_pipeline(config)
