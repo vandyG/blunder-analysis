@@ -78,6 +78,7 @@ def make_offset(
 
     discover_offsets(str(pgn_path), use_memmap=True, memmap_path=memmap_path)
 
+
 def _default_workers() -> int:
     cpu_count = os.cpu_count()
     if cpu_count is None:
@@ -88,24 +89,52 @@ def _default_workers() -> int:
 @app.command()
 def evaluate(
     pgn_path: Path,
-    workers: Annotated[int, typer.Option("--workers", "-W", help="Number of worker processes.", rich_help_panel="Processing Configuration", default_factory=_default_workers)],
+    workers: Annotated[
+        int,
+        typer.Option(
+            "--workers",
+            "-W",
+            help="Number of worker processes.",
+            rich_help_panel="Processing Configuration",
+            default_factory=_default_workers,
+        ),
+    ],
     output_path: Path | None = None,
     checkpoint_path: Path | None = None,
-    batch_size: Annotated[int, typer.Option("--batch-size", "-B", help="Number of positions to process in a batch.", rich_help_panel="Processing Configuration")] = 128,
-    max_games: Annotated[int, typer.Option("--max-games", "-M", help="Maximum number of games to process.", rich_help_panel="Processing Configuration")] = 1000,
+    batch_size: Annotated[
+        int,
+        typer.Option(
+            "--batch-size",
+            "-B",
+            help="Number of positions to process in a batch.",
+            rich_help_panel="Processing Configuration",
+        ),
+    ] = 128,
+    max_games: Annotated[
+        int,
+        typer.Option(
+            "--max-games",
+            "-M",
+            help="Maximum number of games to process.",
+            rich_help_panel="Processing Configuration",
+        ),
+    ] = 1000,
     index_path: Path | None = None,
     hash_mb: Annotated[
-        int, typer.Option("--hash-mb", "-H", rich_help_panel="Engine Configuration", help="Hash table size in MB.")
+        int,
+        typer.Option("--hash-mb", "-H", rich_help_panel="Engine Configuration", help="Hash table size in MB."),
     ] = 512,
     threads: Annotated[
-        int, typer.Option("--threads", "-T", rich_help_panel="Engine Configuration", help="Number of engine threads.")
+        int,
+        typer.Option("--threads", "-T", rich_help_panel="Engine Configuration", help="Number of engine threads."),
     ] = 1,
     multipv: Annotated[
         int,
         typer.Option("--multipv", "-P", rich_help_panel="Engine Configuration", help="Number of principal variations."),
     ] = 1,
     depth: Annotated[
-        int, typer.Option("--depth", "-D", rich_help_panel="Engine Configuration", help="Search depth.")
+        int,
+        typer.Option("--depth", "-D", rich_help_panel="Engine Configuration", help="Search depth."),
     ] = 14,
     info: Annotated[
         str | None,
@@ -134,11 +163,16 @@ def evaluate(
         ),
     ] = False,
     ponder: Annotated[
-        bool, typer.Option("--ponder", rich_help_panel="Engine Configuration", help="Enable pondering.")
+        bool,
+        typer.Option("--ponder", rich_help_panel="Engine Configuration", help="Enable pondering."),
     ] = False,
     show_wdl: Annotated[
         bool,
-        typer.Option("--show-wdl/--hide-wdl", rich_help_panel="Engine Configuration", help="Show WDL statistics in the output."),
+        typer.Option(
+            "--show-wdl/--hide-wdl",
+            rich_help_panel="Engine Configuration",
+            help="Show WDL statistics in the output.",
+        ),
     ] = True,
 ) -> None:
     """Evaluate positions from a PGN file."""

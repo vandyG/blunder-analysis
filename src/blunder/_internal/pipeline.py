@@ -151,7 +151,7 @@ def parse_time_control(tc_str: str) -> tuple[pgn.TimeControlType, int, int]:
             initial = int(initial_str)
             increment = int(increment_str)
             return (time_control_type(initial, increment), initial, increment)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("Malformed time control '%s'; falling back to UNLIMITED", tc)
             return (pgn.TimeControlType.UNLIMITED, 0, 0)
 
@@ -161,7 +161,7 @@ def parse_time_control(tc_str: str) -> tuple[pgn.TimeControlType, int, int]:
         return (time_control_type(initial, 0), initial, 0)
 
     # Try best-effort extraction (e.g., weird annotations)
-    import re
+    import re  # noqa: PLC0415
 
     m = re.search(r"(\d+)(?:\D+(\d+))?", tc)
     if m:
