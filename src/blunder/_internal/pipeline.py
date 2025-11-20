@@ -74,49 +74,6 @@ class ProcessingConfig:
     resume_from_checkpoint: bool = True
     # TODO: Add tuning parameters (e.g., time management, pruning strategy)
 
-
-@dataclass(slots=True)
-class GameRecord:
-    """Container for processed game data destined for the database writer."""
-
-    game_id: str
-    site: str
-    white_elo: int
-    black_elo: int
-    white_rating_diff: int
-    black_rating_diff: int
-    eco: str
-    time_control: pgn.TimeControlType
-    game_time: int
-    increment: int
-    result: int
-    termination: str
-    moves: list[MoveRecord] = field(default_factory=list)
-
-    def add_move(self, move: MoveRecord) -> None:
-        """Append a move while parsing the game incrementally."""
-        self.moves.append(move)
-
-
-@dataclass(slots=True)
-class MoveRecord:
-    """Container for processed move data within a game."""
-
-    turn: chess.Color
-    move: str
-    fullmove_number: int
-    cp_score: int
-    winning_chance: float
-    drawing_chance: float
-    losing_chance: float
-    piece_moved: chess.PieceType
-    board_fen: str
-    is_check: bool
-    mate_in: float | None
-    clock: float
-    eval_delta: int
-
-
 def time_control_type(initial_time: int, increment: int) -> pgn.TimeControlType:
     """Determine time control category by estimated total time (seconds).
 
@@ -220,45 +177,6 @@ class ParquetWriter:
         )
         return output_path, max_offset
 
-
-class DatabaseSessionManager:
-    """Lazy helper for database connectivity and schema management."""
-
-    def __init__(self, database_url: str) -> None:
-        self._database_url = database_url
-        self._engine = None  # TODO: initialize SQLAlchemy engine or similar
-        self._Session = None  # TODO: prepare session factory
-
-    def initialize(self) -> None:
-        """Create engine, reflect or create metadata, and prepare sessions."""
-        if self._engine is not None:
-            return
-        logger.info("Connecting to database at %s", self._database_url)
-        # TODO: Create engine and run schema migrations if necessary
-        raise NotImplementedError("Database initialization is not implemented")
-
-    @contextmanager
-    def session_scope(self) -> Iterator[object]:
-        """Provide a transactional scope for a series of operations."""
-        if self._Session is None:
-            raise RuntimeError("DatabaseSessionManager.initialize must be called first")
-        session = self._Session()  # type: ignore[misc]
-        try:
-            yield session
-            session.commit()
-        except Exception:
-            session.rollback()
-            logger.exception("Rolling back database transaction due to error")
-            raise
-        finally:
-            session.close()
-
-    def insert_batch(self, records: Sequence[GameRecord]) -> None:
-        """Persist a batch of processed games and their moves."""
-        # TODO: Implement efficient bulk insert into Game / Move tables
-        raise NotImplementedError("Bulk insert logic is not implemented")
-
-
 @dataclass(slots=True)
 class OffsetCheckpoint:
     """Track the highest processed PGN offset to support resumable runs."""
@@ -290,15 +208,6 @@ class OffsetCheckpoint:
         if skipped:
             logger.info(f"Skipping {skipped} games at or below checkpoint offset {self.value}")
         return offsets[mask]
-
-    # def update_from_records(self, records: Sequence[GameRecord]) -> None:
-    #     """Advance the checkpoint when a batch is successfully persisted."""
-    #     if not records:
-    #         return
-    #     batch_max = max(record.offset for record in records)
-    #     if self.value is None or batch_max > self.value:
-    #         self.value = batch_max
-    #         self._write()
 
     def update_from_max_offset(self, max_offset: int) -> None:  # NEW: Simpler signature
         """Advance checkpoint when a batch is successfully written."""
@@ -353,30 +262,6 @@ def chunk_offsets(offsets: np.ndarray, batch_size: int) -> Iterator[np.ndarray]:
     total = offsets.size
     for start in range(0, total, batch_size):
         yield offsets[start : start + batch_size]
-
-
-def read_games_by_offsets(pgn_path: Path, offsets: Sequence[int]) -> list[str]:
-    """Read raw PGN text snippets for a contiguous block of offsets."""
-    games: list[str] = []
-    with open(pgn_path, encoding="utf-8") as handle:
-        for idx, offset in enumerate(offsets):
-            handle.seek(offset)
-            raw_game = _read_single_game(handle)
-            if raw_game is None:
-                logger.debug(f"Reached EOF while reading game {idx}")
-                break
-            games.append(raw_game)
-    return games
-
-
-def _read_single_game(handle: TextIO) -> str | None:
-    """Read a single PGN game from the current file pointer.
-
-    Returns ``None`` when the end of file is reached. The caller must ensure the
-    handle is opened in binary mode.
-    """
-    # TODO: Implement buffered read until blank line between games or EOF
-    raise NotImplementedError("_read_single_game must be implemented")
 
 
 def parse_game(
@@ -480,12 +365,6 @@ def parse_game(
     return rows
 
 
-def evaluate_game(game: pgn.Game, config: EngineConfig, *, offset: int) -> GameRecord:
-    """Run engine analysis for key positions within a single game."""
-    # TODO: Integrate python-chess engine.SimpleEngine and compute evaluations
-    raise NotImplementedError("evaluate_game must be implemented")
-
-
 def worker_initialize(engine_config: EngineConfig | None) -> engine.SimpleEngine:
     """Optional initializer executed once per worker process."""
     if engine_config is None:
@@ -585,21 +464,6 @@ def process_batches(
 
         for future in as_completed(futures):
             yield future.result()
-
-
-# def persist_results(
-#     records_iter: Iterable[list[GameRecord]],
-#     db_manager: DatabaseSessionManager,
-#     checkpoint: OffsetCheckpoint | None = None,
-# ) -> None:
-#     """Consume processed records and persist them to the database in batches."""
-#     for records in records_iter:
-#         if not records:
-#             continue
-#         logger.debug("Persisting %d records", len(records))
-#         db_manager.insert_batch(records)
-#         if checkpoint is not None:
-#             checkpoint.update_from_records(records)
 
 
 def report_progress(
