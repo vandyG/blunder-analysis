@@ -8,7 +8,7 @@ Why does this file exist, and why `__main__`? For more info, read:
 
 import sys
 
-from blunder._internal.cli import main
+from blunder._internal.cli import app
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(app())

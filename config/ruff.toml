@@ -70,6 +70,9 @@ ignore = [
     "PLR2004",  # Magic value used in comparison
     "S101",  # Use of assert detected
 ]
+"notebooks/**.ipynb" = [
+    "T201",  # Print statement
+]
 
 [lint.flake8-quotes]
 docstring-quotes = "double"

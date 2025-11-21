@@ -5,7 +5,7 @@
 default: help
 	@echo
 	@echo 'Enable direnv in your shell to use the `make` command: `direnv allow`'
-	@echo 'Or use `python scripts/make ARGS` to run the commands/tasks directly.'
+	@echo 'Or use `make <task> ARGS="..."` (or `ARG=`) to forward extra arguments.'
 
 .DEFAULT_GOAL: default
 
@@ -24,6 +24,7 @@ actions = \
 	format \
 	help \
 	multirun \
+	pg \
 	release \
 	run \
 	setup \
@@ -32,4 +33,4 @@ actions = \
 
 .PHONY: $(actions)
 $(actions):
-	@python scripts/make "$@"
+	@python scripts/make "$@" $(strip $(if $(ARG),$(ARG),$(ARGS)))

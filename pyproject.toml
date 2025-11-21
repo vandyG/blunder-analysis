@@ -9,7 +9,7 @@ authors = [{name = "Vandit Goel", email = "vandy.goel23@gmail.com"}]
 license = "MIT"
 license-files = ["LICENSE"]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 keywords = []
 dynamic = ["version"]
 classifiers = [
@@ -18,7 +18,6 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -31,6 +30,11 @@ classifiers = [
 ]
 dependencies = [
     "chess>=1.11.2",
+    "numpy>=2.0.2",
+    "polars>=1.35.1",
+    "pyarrow>=22.0.0",
+    "tqdm>=4.67.1",
+    "typer>=0.20.0",
 ]
 
 [project.urls]
@@ -44,35 +48,25 @@ Gitter = "https://gitter.im/blunder-analysis/community"
 Funding = "https://github.com/sponsors/vandyG"
 
 [project.scripts]
-blunder = "blunder.cli:main"
+blunder = "blunder:app"
 
 [tool.hatch.version]
 source = "vcs"
 
 [tool.hatch.build.targets.sdist]
-include = [
-    "config/**",
-    "docs/**",
-    "scripts/**",
-    "share/**",
-    "tests/**",
-    "duties.py",
-    "mkdocs.yml",
-    "*.md",
-    "LICENSE",
-]
 exclude = [
     ".github/**",
     ".github",
+    "notebooks/**",
 ]
+sources = ["src"]
 
 [tool.hatch.build.targets.wheel]
-include = [
-    "share/**",
-]
+sources = ["src"]
 exclude = [
     ".github/**",
     ".github",
+    "notebooks/**",
 ]
 
 [dependency-groups]
