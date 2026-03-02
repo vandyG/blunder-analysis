@@ -5,7 +5,9 @@
 [![pypi version](https://img.shields.io/pypi/v/blunder.svg)](https://pypi.org/project/blunder/)
 [![gitter](https://img.shields.io/badge/matrix-chat-4DB798.svg?style=flat)](https://app.gitter.im/#/room/#blunder-analysis:gitter.im)
 
-Blunder analysis in Chess
+A data pipeline and analysis toolkit for studying chess blunders at scale.
+
+This project supports the research paper *Chess Blunder Analysis Using Multivariate and Linear Algebraic Approaches*, which uses Lichess game data and Stockfish evaluations to study what makes players blunder. Errors are defined by winning-chance drops: **Blunder** (≥30%), **Mistake** (≥20%), **Inaccuracy** (≥10%). Key findings include: error rates rise with position sharpness and time pressure, decline with player Elo most sharply in longer formats, and Knights/Queens tend to produce more severe errors than other pieces. PCA across ~12.5M move records shows the feature space lacks strong low-rank structure, motivating future non-linear sequential models.
 
 ## Installation
 
