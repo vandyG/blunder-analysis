@@ -1,0 +1,3 @@
+[submodule "research_paper"]
+	path = research_paper
+	url = git@github.com:vandyG/blunder-analysis-paper.git
